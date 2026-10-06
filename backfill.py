@@ -1,4 +1,3 @@
-import os
 import time
 from datetime import date, timedelta
 
@@ -13,8 +12,13 @@ def main():
 
     history = load_history()
 
+    # history.csv columns:
+    # 0 = Trade Date
+    # 1 = Symbol
+    # 2 = Expiry Bucket
+
     current_dates = set(
-        (row["Trade Date"], row["Symbol"], row["Expiry Bucket"])
+        (row[0], row[1], row[2])
         for row in history
     )
 
@@ -24,7 +28,7 @@ def main():
 
     while d <= END_DATE:
 
-        # Saturday / Sunday skip
+        # Skip Saturday and Sunday
         if d.weekday() < 5:
 
             trade_date = d.strftime("%Y-%m-%d")
@@ -32,12 +36,14 @@ def main():
             print(f"Processing {trade_date} ...")
 
             try:
+
                 rows = process_date(d)
 
                 if rows:
 
                     for row in rows:
 
+                        # process_date() returns dictionary rows
                         key = (
                             row["Trade Date"],
                             row["Symbol"],
@@ -45,17 +51,32 @@ def main():
                         )
 
                         if key not in current_dates:
-                            history.append(row)
+
+                            history.append([
+                                row["Trade Date"],
+                                row["Symbol"],
+                                row["Expiry Bucket"],
+                                row["Expiry"],
+                                row["Futures Close"],
+                                row["ATM Strike"],
+                                row["CE Close"],
+                                row["PE Close"],
+                                row["Straddle"],
+                                row["Straddle %"]
+                            ])
+
                             current_dates.add(key)
                             added += 1
 
                     processed += 1
+
                     print(
                         f"{trade_date}: "
                         f"{len(rows)} records found"
                     )
 
                 else:
+
                     print(
                         f"{trade_date}: "
                         f"No NSE data available"
@@ -67,7 +88,7 @@ def main():
                     f"{trade_date}: ERROR - {e}"
                 )
 
-            # Small delay to avoid hitting NSE too aggressively
+            # Small delay between NSE requests
             time.sleep(1)
 
         d += timedelta(days=1)
