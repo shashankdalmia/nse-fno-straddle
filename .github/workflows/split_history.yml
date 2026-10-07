@@ -1,0 +1,36 @@
+name: Split History By Month
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  split:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install pandas
+        run: |
+          pip install pandas
+
+      - name: Split history into monthly files
+        run: |
+          python split_history.py
+
+      - name: Save monthly files
+        run: |
+          git config --global user.name "github-actions"
+          git config --global user.email "github-actions@github.com"
+          git add monthly/
+          git commit -m "Create monthly history files" || echo "No changes to commit"
+          git push
