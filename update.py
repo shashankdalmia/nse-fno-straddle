@@ -2,14 +2,9 @@ import io
 import zipfile
 import requests
 import pandas as pd
+import calendar
 from datetime import datetime, timedelta
 from pathlib import Path
-
-# ============================================================
-# NSE F&O EOD ATM STRADDLE DATABASE
-# Current / Near / Far expiry
-# ATM calculated from EACH expiry's FUTURES CLOSE
-# ============================================================
 
 REPO_FILE = Path("history.csv")
 
@@ -28,16 +23,93 @@ HEADERS = {
 }
 
 SYMBOLS_TO_EXCLUDE = {
-    "NIFTY",
-    "BANKNIFTY",
     "FINNIFTY",
     "MIDCPNIFTY",
     "NIFTYNXT50",
 }
 
 
+# NSE F&O holidays for 2026
+NSE_HOLIDAYS_2026 = {
+    "2026-01-26",
+    "2026-03-03",
+    "2026-03-26",
+    "2026-03-31",
+    "2026-04-03",
+    "2026-04-14",
+    "2026-05-01",
+    "2026-05-28",
+    "2026-06-26",
+    "2026-09-14",
+    "2026-10-02",
+    "2026-10-20",
+    "2026-11-10",
+    "2026-11-24",
+    "2026-12-25",
+}
+
+
+def is_trading_day(d):
+    if d.weekday() >= 5:
+        return False
+
+    if d.strftime("%Y-%m-%d") in NSE_HOLIDAYS_2026:
+        return False
+
+    return True
+
+
+def monthly_expiry(year, month):
+    """
+    Standard NSE monthly expiry:
+    Last Tuesday of the month.
+    If Tuesday is a trading holiday,
+    move backwards to previous trading day.
+    """
+
+    last_day = calendar.monthrange(year, month)[1]
+    d = datetime(year, month, last_day).date()
+
+    # Move to last Tuesday
+    while d.weekday() != 1:
+        d -= timedelta(days=1)
+
+    # If Tuesday is holiday, move backwards
+    while not is_trading_day(d):
+        d -= timedelta(days=1)
+
+    return pd.Timestamp(d)
+
+
+def get_standard_monthly_expiries(trade_date, number=3):
+    """
+    Return the three standard monthly expiries applicable
+    from the trade date onward.
+    """
+
+    year = trade_date.year
+    month = trade_date.month
+
+    expiries = []
+
+    # Start from current month and look sufficiently far ahead
+    for i in range(0, 8):
+        total_month = month - 1 + i
+        y = year + total_month // 12
+        m = total_month % 12 + 1
+
+        expiry = monthly_expiry(y, m)
+
+        if expiry.date() >= trade_date:
+            expiries.append(expiry)
+
+        if len(expiries) >= number:
+            break
+
+    return expiries[:number]
+
+
 def download_nse(trade_date):
-    """Download NSE F&O UDiFF ZIP for one date."""
 
     date_text = trade_date.strftime("%Y%m%d")
     url = NSE_URL.format(date=date_text)
@@ -62,6 +134,7 @@ def download_nse(trade_date):
         return None
 
     with zipfile.ZipFile(io.BytesIO(response.content)) as z:
+
         csv_files = [
             x for x in z.namelist()
             if x.lower().endswith(".csv")
@@ -71,7 +144,10 @@ def download_nse(trade_date):
             return None
 
         with z.open(csv_files[0]) as f:
-            return pd.read_csv(f, low_memory=False)
+            return pd.read_csv(
+                f,
+                low_memory=False
+            )
 
 
 def clean_data(df, trade_date):
@@ -87,7 +163,7 @@ def clean_data(df, trade_date):
         "XpryDt",
         "StrkPric",
         "OptnTp",
-        "ClsPric",
+        "ClsPric"
     ]
 
     for col in required:
@@ -132,29 +208,14 @@ def clean_data(df, trade_date):
         errors="coerce"
     )
 
-    df["trade_date"] = trade_date.strftime("%Y-%m-%d")
-
     return df
 
 
-def get_monthly_expiries(futures):
-
-    futures = futures.copy()
-
-    futures = futures[
-        futures["XpryDt"].notna()
-    ]
-
-    expiries = sorted(
-        futures["XpryDt"].drop_duplicates()
-    )
-
-    # Futures are monthly contracts.
-    # First three available expiries = Current / Near / Far.
-    return expiries[:3]
-
-
-def calculate_for_symbol(df, symbol, trade_date):
+def calculate_for_symbol(
+    df,
+    symbol,
+    trade_date
+):
 
     sym = df[
         df["TckrSymb"] == symbol
@@ -186,47 +247,49 @@ def calculate_for_symbol(df, symbol, trade_date):
     if futures.empty or options.empty:
         return []
 
-    expiries = get_monthly_expiries(futures)
+    # -------------------------------------------------
+    # IMPORTANT:
+    # Use STANDARD NSE monthly expiries.
+    # Do NOT simply take the first 3 available
+    # expiry dates from the bhavcopy.
+    # -------------------------------------------------
 
-    if len(expiries) == 0:
-        return []
-
-    buckets = [
-        ("CURRENT", expiries[0])
-    ]
-
-    if len(expiries) >= 2:
-        buckets.append(
-            ("NEAR", expiries[1])
+    standard_expiries = (
+        get_standard_monthly_expiries(
+            trade_date,
+            3
         )
-
-    if len(expiries) >= 3:
-        buckets.append(
-            ("FAR", expiries[2])
-        )
+    )
 
     results = []
 
+    buckets = [
+        ("CURRENT", standard_expiries[0]),
+        ("NEAR", standard_expiries[1]),
+        ("FAR", standard_expiries[2]),
+    ]
+
     for bucket, expiry in buckets:
 
+        # Exact monthly expiry only
         fut = futures[
             futures["XpryDt"] == expiry
-        ]
+        ].copy()
 
-        if fut.empty:
+        opt_exp = options[
+            options["XpryDt"] == expiry
+        ].copy()
+
+        # IMPORTANT:
+        # If the standard monthly contract does not
+        # exist for this symbol, DO NOT silently use
+        # another expiry.
+        if fut.empty or opt_exp.empty:
             continue
 
         future_close = float(
             fut.iloc[0]["ClsPric"]
         )
-
-        # ATM = strike closest to THAT expiry's futures close
-        opt_exp = options[
-            options["XpryDt"] == expiry
-        ].copy()
-
-        if opt_exp.empty:
-            continue
 
         strikes = sorted(
             opt_exp["StrkPric"]
@@ -237,9 +300,12 @@ def calculate_for_symbol(df, symbol, trade_date):
         if not strikes:
             continue
 
+        # ATM = strike nearest to FUTURES close
         atm = min(
             strikes,
-            key=lambda x: abs(x - future_close)
+            key=lambda x: abs(
+                x - future_close
+            )
         )
 
         ce = opt_exp[
@@ -274,16 +340,39 @@ def calculate_for_symbol(df, symbol, trade_date):
         )
 
         results.append({
-            "Trade Date": trade_date.strftime("%Y-%m-%d"),
-            "Symbol": symbol,
-            "Expiry Bucket": bucket,
-            "Expiry": expiry.strftime("%Y-%m-%d"),
-            "Futures Close": future_close,
-            "ATM Strike": atm,
-            "CE Close": ce_close,
-            "PE Close": pe_close,
-            "Straddle": straddle,
-            "Straddle %": straddle_pct,
+            "Trade Date":
+                trade_date.strftime(
+                    "%Y-%m-%d"
+                ),
+
+            "Symbol":
+                symbol,
+
+            "Expiry Bucket":
+                bucket,
+
+            "Expiry":
+                expiry.strftime(
+                    "%Y-%m-%d"
+                ),
+
+            "Futures Close":
+                future_close,
+
+            "ATM Strike":
+                atm,
+
+            "CE Close":
+                ce_close,
+
+            "PE Close":
+                pe_close,
+
+            "Straddle":
+                straddle,
+
+            "Straddle %":
+                straddle_pct,
         })
 
     return results
@@ -292,7 +381,8 @@ def calculate_for_symbol(df, symbol, trade_date):
 def process_date(trade_date):
 
     print(
-        f"Downloading NSE data for {trade_date:%Y-%m-%d}"
+        f"Downloading NSE data for "
+        f"{trade_date:%Y-%m-%d}"
     )
 
     df = download_nse(trade_date)
@@ -304,9 +394,11 @@ def process_date(trade_date):
         )
         return []
 
-    df = clean_data(df, trade_date)
+    df = clean_data(
+        df,
+        trade_date
+    )
 
-    # All symbols having futures
     futures_symbols = sorted(
         df.loc[
             df["FinInstrmTp"].isin(
@@ -323,7 +415,6 @@ def process_date(trade_date):
 
     for symbol in futures_symbols:
 
-        # Include all F&O stocks and the two main indices
         if symbol in SYMBOLS_TO_EXCLUDE:
             continue
 
@@ -335,7 +426,7 @@ def process_date(trade_date):
 
         results.extend(rows)
 
-    # Add NIFTY and BANKNIFTY explicitly
+    # NIFTY and BANKNIFTY explicitly included
     for index_symbol in [
         "NIFTY",
         "BANKNIFTY"
@@ -383,10 +474,10 @@ def save_history(df):
         "CE Close",
         "PE Close",
         "Straddle",
-        "Straddle %",
+        "Straddle %"
     ]
 
-    df = df[columns]
+    df = df[columns].copy()
 
     df = df.sort_values(
         [
@@ -404,19 +495,14 @@ def save_history(df):
 
 def main():
 
-    # --------------------------------------------------------
-    # Normally process only the latest available trading day.
-    # --------------------------------------------------------
-
     today = datetime.now().date()
 
-    # Try today first.
     dates_to_try = [
         today,
         today - timedelta(days=1),
         today - timedelta(days=2),
         today - timedelta(days=3),
-        today - timedelta(days=4),
+        today - timedelta(days=4)
     ]
 
     new_rows = []
@@ -427,8 +513,6 @@ def main():
 
         if rows:
             new_rows.extend(rows)
-
-            # Stop after first available NSE trading day
             break
 
     if not new_rows:
@@ -442,7 +526,9 @@ def main():
     old_df = load_history()
 
     if old_df.empty:
+
         final_df = new_df
+
     else:
 
         final_df = pd.concat(
@@ -453,24 +539,29 @@ def main():
             ignore_index=True
         )
 
-        # Remove duplicate records
-        final_df = final_df.drop_duplicates(
-            subset=[
-                "Trade Date",
-                "Symbol",
-                "Expiry Bucket"
-            ],
-            keep="last"
+        final_df = (
+            final_df
+            .drop_duplicates(
+                subset=[
+                    "Trade Date",
+                    "Symbol",
+                    "Expiry Bucket"
+                ],
+                keep="last"
+            )
         )
 
-    save_history(final_df)
+    save_history(
+        final_df
+    )
 
     print(
         f"Saved {len(new_df)} new rows."
     )
 
     print(
-        f"Total history rows: {len(final_df)}"
+        f"Total history rows: "
+        f"{len(final_df)}"
     )
 
 
