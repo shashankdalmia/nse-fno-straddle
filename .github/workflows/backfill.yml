@@ -2,7 +2,8 @@ name: Historical Backfill
 
 on:
   workflow_dispatch:
-
+permissions:
+  contents: write
 jobs:
   backfill:
     runs-on: ubuntu-latest
