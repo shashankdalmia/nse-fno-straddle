@@ -2,7 +2,9 @@ name: NSE F&O Daily Straddle Update
 
 on:
   workflow_dispatch:
+
   schedule:
+    # 19:00 IST = 13:30 UTC
     - cron: "30 13 * * 1-5"
 
 permissions:
@@ -13,6 +15,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -29,10 +32,18 @@ jobs:
         run: |
           python update.py
 
-      - name: Save updated history
+      - name: Rebuild monthly files
+        run: |
+          python split_history.py
+
+      - name: Save updated history and monthly files
         run: |
           git config user.name "NSE F&O Bot"
           git config user.email "actions@github.com"
+
           git add history.csv
+          git add monthly/
+
           git diff --cached --quiet || git commit -m "Update NSE F&O EOD data"
+
           git push
