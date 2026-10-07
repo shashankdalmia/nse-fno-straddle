@@ -1,54 +1,65 @@
 import time
 from datetime import date, timedelta
-
 import pandas as pd
 
-from update import process_date, load_history, save_history
-
+from update import (
+    process_date,
+    save_history
+)
 
 START_DATE = date(2026, 1, 1)
 END_DATE = date.today() - timedelta(days=1)
 
 
+COLUMNS = [
+    "Trade Date",
+    "Symbol",
+    "Expiry Bucket",
+    "Expiry",
+    "Futures Close",
+    "ATM Strike",
+    "CE Close",
+    "PE Close",
+    "Straddle",
+    "Straddle %"
+]
+
+
 def main():
 
-    history = load_history()
+    print("=" * 70)
+    print("FRESH NSE F&O STRADDLE HISTORY REBUILD")
+    print("=" * 70)
 
-    if history.empty:
-        history = pd.DataFrame(columns=[
-            "Trade Date",
-            "Symbol",
-            "Expiry Bucket",
-            "Expiry",
-            "Futures Close",
-            "ATM Strike",
-            "CE Close",
-            "PE Close",
-            "Straddle",
-            "Straddle %"
-        ])
+    print(f"Start date : {START_DATE}")
+    print(f"End date   : {END_DATE}")
+    print()
+    print("IMPORTANT:")
+    print("Existing history.csv will be completely rebuilt.")
+    print("Old CURRENT/NEAR/FAR records will NOT be retained.")
+    print("=" * 70)
 
-    # Existing records
-    current_keys = set(
-        zip(
-            history["Trade Date"].astype(str),
-            history["Symbol"].astype(str),
-            history["Expiry Bucket"].astype(str)
-        )
-    )
-
-    new_records = []
+    all_records = []
 
     d = START_DATE
-    processed = 0
+
+    trading_days = 0
+    successful_days = 0
+    failed_days = 0
 
     while d <= END_DATE:
 
+        # Monday-Friday only.
+        # NSE holiday dates are handled by the absence
+        # of the NSE bhavcopy file.
         if d.weekday() < 5:
 
-            print("=" * 50)
-            print(f"Processing {d}")
-            print("=" * 50)
+            trading_days += 1
+
+            print()
+            print("-" * 70)
+            print(f"Processing: {d}")
+            print("-" * 70)
 
             try:
 
@@ -56,56 +67,87 @@ def main():
 
                 if rows:
 
-                    added_today = 0
+                    all_records.extend(rows)
 
-                    for row in rows:
-
-                        key = (
-                            row["Trade Date"],
-                            row["Symbol"],
-                            row["Expiry Bucket"]
-                        )
-
-                        if key not in current_keys:
-
-                            new_records.append(row)
-                            current_keys.add(key)
-                            added_today += 1
-
-                    processed += 1
+                    successful_days += 1
 
                     print(
-                        f"{d}: {len(rows)} rows found, "
-                        f"{added_today} new rows added"
+                        f"{d}: "
+                        f"{len(rows)} records collected"
                     )
 
                 else:
 
+                    failed_days += 1
+
                     print(
-                        f"{d}: No NSE file/data"
+                        f"{d}: "
+                        f"No NSE data / no valid records"
                     )
 
             except Exception as e:
 
+                failed_days += 1
+
                 print(
-                    f"{d}: ERROR - {e}"
+                    f"{d}: ERROR"
                 )
 
+                print(
+                    str(e)
+                )
+
+            # Small pause to avoid hammering NSE
             time.sleep(1)
 
         d += timedelta(days=1)
 
-    # Add all new records at once
-    if new_records:
+    print()
+    print("=" * 70)
+    print("RAW COLLECTION COMPLETE")
+    print("=" * 70)
 
-        new_df = pd.DataFrame(new_records)
+    print(
+        f"Weekdays checked     : {trading_days}"
+    )
 
-        final_df = pd.concat(
-            [history, new_df],
-            ignore_index=True
-        )
+    print(
+        f"Successful days      : {successful_days}"
+    )
 
-        final_df = final_df.drop_duplicates(
+    print(
+        f"Days without records : {failed_days}"
+    )
+
+    print(
+        f"Raw records collected: {len(all_records)}"
+    )
+
+    if not all_records:
+
+        print()
+        print("NO RECORDS FOUND.")
+        print("history.csv was NOT changed.")
+        return
+
+    # -------------------------------------------------
+    # Create fresh dataframe
+    # -------------------------------------------------
+
+    history = pd.DataFrame(
+        all_records
+    )
+
+    # Ensure exact column order
+    history = history[COLUMNS]
+
+    # -------------------------------------------------
+    # Remove accidental duplicates
+    # -------------------------------------------------
+
+    history = (
+        history
+        .drop_duplicates(
             subset=[
                 "Trade Date",
                 "Symbol",
@@ -113,23 +155,45 @@ def main():
             ],
             keep="last"
         )
+    )
 
-        save_history(final_df)
+    # -------------------------------------------------
+    # Sort
+    # -------------------------------------------------
 
-        print("=" * 50)
-        print("BACKFILL COMPLETE")
-        print(f"Trading days processed: {processed}")
-        print(f"New records added: {len(new_records)}")
-        print(f"Total history rows: {len(final_df)}")
-        print("=" * 50)
+    history = history.sort_values(
+        [
+            "Trade Date",
+            "Symbol",
+            "Expiry Bucket"
+        ]
+    )
 
-    else:
+    # -------------------------------------------------
+    # Save completely fresh history
+    # -------------------------------------------------
 
-        print("=" * 50)
-        print("NO NEW RECORDS")
-        print(f"Trading days processed: {processed}")
-        print(f"Existing history rows: {len(history)}")
-        print("=" * 50)
+    save_history(
+        history
+    )
+
+    print()
+    print("=" * 70)
+    print("BACKFILL COMPLETE")
+    print("=" * 70)
+
+    print(
+        f"Final history rows : {len(history)}"
+    )
+
+    print(
+        f"Trading days       : {successful_days}"
+    )
+
+    print()
+    print("Fresh history.csv has been created.")
+    print("Old incorrect bucket assignments have been removed.")
+    print("=" * 70)
 
 
 if __name__ == "__main__":
